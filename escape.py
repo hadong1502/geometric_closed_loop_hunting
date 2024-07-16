@@ -1,6 +1,3 @@
-'''
-The main script run during experiments. 
-'''
 import serial
 import utils
 import numpy as np
@@ -13,6 +10,53 @@ import pickle
 from time import perf_counter
 import os
 
+from probabilistic_escape import generate_angles
+
+########################################################################################## UPDATE BELOW BEFORE RUNNING ################################################################################################
+# name format: e.g, SC40_probescape_speed3000_chiphunt_0.8cm-datetime
+log_dir = r'C:\Users\meisterlab\Desktop\ha_dong_surf2024\data'     # where to save the logs and figures
+mouse_id = 'SC44'
+escape_strategy = 'classic' # Either 'prob' or 'classic'
+chip_length = '0.8' # In cm
+trial_num = '1'
+speed = 3000    # typically for 3000 the mouse is kinda hard to catch the puck reliably
+                # for speeds below 2000 the mouse isn't really engaged. 
+
+if escape_strategy != 'prob' and escape_strategy != 'classic':
+    raise ValueError("Invalid escape strategy. Must be 'prob' or 'classic'.")
+########################################################################################## UPDATE ABOVE BEFORE RUNNING ################################################################################################
+
+# record experiment details
+def get_today_date():
+    return datetime.today().strftime('%m%d%Y%H%M%S')
+today = str(get_today_date())
+experiment_name = f'{mouse_id}_{escape_strategy}escape_speed{speed}_chiphunt_{chip_length}cm'
+output_dir = os.path.join(log_dir, f"{experiment_name}-{today}")
+
+print(f"""
+Running the experiment... 
+Strategy: {escape_strategy}
+Speed: {speed}
+Mouse ID: {mouse_id}
+Chip length: {chip_length}
+""")
+
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+
+# generate the von Mises distribution for probabilistic escape
+if escape_strategy == 'prob':
+    print('Generating von Mises distribution...')
+    # Define the peaks (mean directions) and their contributions
+    peaks = np.array([70, 90, 120, 150, 180, 204])
+    contributions = np.array([0.01666666667, 0.08333333333, 0.175, 0.35, 0.325, 0.05])
+    kappa = 90  # Concentration parameter
+    num_points = 10000
+
+    # Run the function and get the angle array in radians
+    angle_array = generate_angles(output_dir, peaks, contributions, kappa, num_points)
+    print('von Mises distribution generated.')
+
 class State(Enum):  # state machine. The puck will be in one of these states at any given time
     MIDDLE = 0  # corresponds to the normal case
     LEAVE_CORNER = 1    # will switch to this state when puck is at the corner, exit at constant velocity
@@ -21,7 +65,7 @@ class State(Enum):  # state machine. The puck will be in one of these states at 
 def receive_data(ser):
     '''
     ser: serial.Serial object
-    just a helper function to receive data from the serial port
+    A helper function to receive data from the serial port
     '''
     data = ser.read(1024)
     if len(data) == 0:  # no data received
@@ -33,22 +77,16 @@ def receive_data(ser):
         return None
 
     data = data.replace('e', '').replace('s', '')   # e and s marks the start and end of the data
-    # print(data)
     return data
 
 # system parameters
 control_gantry = True   # set to False when debugging, system still runs except gantry doesn't move
 corr_vec = np.array([483 / 320, 454 / 240]) # convert pixels to milimeter
-speed = 3000    # typically for 3000 the mouse is kinda hard to catch the puck reliably
-                # for speeds below 2000 the mouse isn't really engaged. 
-edges = [(279, 220), (41, 223), (37, 23), (276, 25)]
-x_max, x_min, y_max, y_min = 270, 45, 210, 30   # determined from 'edges', this defines the valid region for the gantry
+edges = [(276, 218), (37, 218), (37, 25), (276, 25)] # [(279, 220), (41, 223), (37, 23), (276, 25)]
+x_max, x_min, y_max, y_min = 260, 55, 200, 40 #270, 45, 210, 30   
 sub_corner_distance = 30        # units in mm, the distance for the system to identify that the puck has left the corner
 gantry_history_length = 3       # number of frames to look back for gantry input
 trigger_distance = 120          # distance between puck and mouse for the system to start moving the gantry
-output_dir = r'C:\git\rot2-project\data\2024-03-18_SC23\trial3'     # where to save the logs and figures
-
-# os.mkdir(output_dir)
 
 chip_kf = KalmanFilter( # define the kalman filter for the puck
     np.array([[100], [100]]), # x and y position
@@ -70,7 +108,7 @@ chip_kf = KalmanFilter( # define the kalman filter for the puck
 utils.print_ports()
 ser = serial.Serial('COM6', baudrate=115200, timeout=0.01)
 if control_gantry:
-    gt = Gantry()
+    gt = Gantry(port='COM7')
 
 # system state variables
 state = State.MIDDLE
@@ -97,8 +135,11 @@ try:
         print(f'i: {i}')
         print(datetime.now())
 
+        #STEP 1: PARSE DATA ON MOUSE AND POSITION FROM SERIAL PORT
+
         # parsing data into integer pixel values
         mouse_x, mouse_y, chip_x, chip_y = data.split(',')
+
         # convert to int
         chip_x, chip_y, mouse_x, mouse_y = int(chip_x), int(chip_y), int(mouse_x), int(mouse_y)
 
@@ -106,15 +147,17 @@ try:
 
         # convert to mm
         mouse_pos_mm = np.array([mouse_x, mouse_y]) * corr_vec
-        chip_pos_mm = np.array([chip_x, chip_y]) * corr_vec
+        chip_raw_pos_mm = np.array([chip_x, chip_y]) * corr_vec
 
-        print(f'mouse_raw: {mouse_pos_mm[0]}, {mouse_pos_mm[1]} | chip_raw: {chip_pos_mm[0]}, {chip_pos_mm[1]}')
+        print(f'mouse_raw: {mouse_pos_mm[0]}, {mouse_pos_mm[1]} | chip_raw: {chip_raw_pos_mm[0]}, {chip_raw_pos_mm[1]}')
+
+        # STEP 2: PREDICT PUCK POSITION 
 
         # update kalman filter
         u = gantry_cmd_history[i % gantry_history_length].reshape(2, 1) * 5 # using gantry input from 3 frames ago
         chip_kf.predict(u = u)    # this will correspond to gantry input from 3 frames ago
         if chip_x != -1:
-            chip_kf.update(chip_pos_mm.reshape(2, 1))
+            chip_kf.update(chip_raw_pos_mm.reshape(2, 1))
             
         if mouse_x == -1:
             mouse_pos_mm = prev_mouse_pos
@@ -129,30 +172,64 @@ try:
         print(f'predicted_chip_pos: {predicted_chip_pos[0]}, {predicted_chip_pos[1]}')
         chip_x, chip_y = predicted_chip_pos[0] / corr_vec[0], predicted_chip_pos[1] / corr_vec[1]   # convert back to pixel coordinates
 
-        vec = predicted_chip_pos - mouse_pos_mm    # compute the escape vector first, before using the predicted future chip position
+        classic_vec = predicted_chip_pos - mouse_pos_mm    # compute the escape vector first, before using the predicted future chip position
         # an interesting biology question, should the prey's escape strategy depend on it's current position or the predator's predicted future position?
-        dist = np.linalg.norm(vec)  # distance between puck and mouse
+        dist = np.linalg.norm(classic_vec)  # distance between puck and mouse
         
         print(f'dist: {dist}')
-        print(f'vec: {vec}')
+        print(f'classic_vec: {classic_vec}')
         print(f'state: {state}')
+
+        # STEP 3: ESCAPE STRATEGY 
+        if escape_strategy == 'prob':
+            op_vec = -classic_vec  # vector pointing from puck to mouse
+
+            # import angle array:
+            angle = np.random.choice(angle_array)
+            escape_angle = angle if np.random.rand() > 0.5 else -angle
+            cos_angle = np.cos(escape_angle)
+            sin_angle = np.sin(escape_angle)
+
+
+            # Define a rotation matrix to rotate 'op_vec' by 'escape_angle'
+            rotation_matrix = np.array([
+                [cos_angle, -sin_angle],
+                [sin_angle, cos_angle]
+            ])
+
+            # Generate the escape vector that makes an angle of "escape_angle" with "op_vec"
+            prob_vec = rotation_matrix @ op_vec
+            print(f'probabilisitc_vec: {prob_vec}')
+
+            # Use this new escape vector for the following calculations
+            vec = prob_vec
+        
+        elif escape_strategy == 'classic':
+            vec = classic_vec
+
+        # STEP 4: ADJUST ESCAPE VECTOR BY CORNER AND EDGE (use the classic escape vector for this)
 
         if state == State.MIDDLE:
             corner = (chip_x >= x_max or chip_x <= x_min) and (chip_y >= y_max or chip_y <= y_min)  # check if puck is at the corner
             if not corner:
                 # edge constraints, removing component of vec that is perpendicular to edge
                 if chip_x >= x_max:
+                    vec = classic_vec
                     vec[0] = min(0, vec[0])
                 elif chip_x <= x_min:
+                    vec = classic_vec
                     vec[0] = max(0, vec[0])
                 if chip_y >= y_max:
+                    vec = classic_vec
                     vec[1] = min(0, vec[1])
                 elif chip_y <= y_min:
+                    vec = classic_vec
                     vec[1] = max(0, vec[1])
                 
                 print(f'at edge, vec: {vec}')
             else:
                 state = State.LEAVE_CORNER  # switch state
+                vec = classic_vec
                 print('state switch to LEAVE_CORNER')
 
                 at_x_max = int(chip_x >= x_max) * 2 - 1 # 1 if chip_x >= x_max, -1 otherwise
@@ -187,10 +264,11 @@ try:
                 state = State.MIDDLE
                 print('state switch to MIDDLE')
         
-        vec = vec / (np.linalg.norm(vec) + 0.01)    # normalize the vector to ensure constant speed
+        vec = vec / (np.linalg.norm(vec) + 0.01)    # normalize the vector to ensure constant speed #HA# CHECK THIS ??
 
         print(f'elapsed calculation time: {(perf_counter() - tic) * 1000} ms')
-        # actuate gantry
+
+        # STEP 5: ACTUATE GANTRY 
         if control_gantry and dist < trigger_distance:
             vec_gantry = vec * speed / 1000 / 1.3   # require a 1.3 correction factor because otherwise the gantry can't move that far in the given time
             gt.send(f'G01 X{-vec_gantry[0]:.2f} Y{-vec_gantry[1]:.2f} F{speed}', wait_for_read=False)  # Note that the coordinate system of the gantry with respect to the camera is flipped
@@ -203,7 +281,7 @@ try:
         mouse_pos_store.append(mouse_pos_mm)
         chip_pos_store.append(chip_pos_mm)
         gantry_cmd_store.append(vec_gantry)
-        chip_pos_raw_store.append(chip_pos_mm)
+        chip_pos_raw_store.append(chip_raw_pos_mm)
 
         i += 1
         print(f'elapsed time: {(perf_counter() - tic) * 1000} ms')
@@ -213,6 +291,7 @@ except KeyboardInterrupt:   # save data when interrupted
     gt.close()
 
     # plot
+
     mouse_pos_store = np.array(mouse_pos_store)
     chip_pos_store = np.array(chip_pos_store)
     chip_pos_raw_store = np.array(chip_pos_raw_store)
@@ -225,6 +304,10 @@ except KeyboardInterrupt:   # save data when interrupted
         pickle.dump(chip_pos_store, f)
     with open(os.path.join(output_dir, 'chip_pos_raw_store.pkl'), 'wb+') as f:
         pickle.dump(chip_pos_raw_store, f)
+    with open(os.path.join(output_dir, 'gantry_cmd_store.pkl'), 'wb+') as f:
+        pickle.dump(gantry_cmd_store, f)
+    with open(os.path.join(output_dir, 'gantry_position.pkl'), 'wb+') as f:
+        pickle.dump(gantry_position, f)
 
 
     plt.plot(chip_pos_store[:, 0], label='chip x est')
@@ -242,6 +325,7 @@ except KeyboardInterrupt:   # save data when interrupted
     plt.plot(chip_pos_store[:, 0], chip_pos_store[:, 1], label='chip est')
     plt.plot(chip_pos_raw_store[:, 0], chip_pos_raw_store[:, 1], label='chip raw')
     plt.plot(gantry_position[:, 0], gantry_position[:, 1], label='gantry pos')
+    plt.scatter(chip_pos_store[0, 0], chip_pos_store[0, 1], color='red', s=100, zorder=5, label='start point') #HA# added start point
     plt.xlim(0, 483)
     plt.ylim(0, 454)
     plt.legend()
@@ -250,6 +334,7 @@ except KeyboardInterrupt:   # save data when interrupted
     plt.close()
 
     plt.plot(mouse_pos_store[:, 0], mouse_pos_store[:, 1], label='mouse pos')
+    plt.scatter(mouse_pos_store[0, 0], mouse_pos_store[0, 1], color='red', s=100, zorder=5, label='start point') #HA# added start point
     plt.legend()
     plt.xlim(0, 483)
     plt.ylim(0, 454)
@@ -257,3 +342,4 @@ except KeyboardInterrupt:   # save data when interrupted
     plt.savefig(os.path.join(output_dir, 'mouse pos.png'))
     plt.close()
 
+    print(f'Experiment on {today} with {escape_strategy} escape of speed {speed} on mouse {mouse_id} completed. Data saved into {log_dir}')
