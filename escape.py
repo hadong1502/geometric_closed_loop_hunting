@@ -48,8 +48,8 @@ if not os.path.exists(output_dir):
 if escape_strategy == 'prob':
     print('Generating von Mises distribution...')
     # Define the peaks (mean directions) and their contributions
-    peaks = np.array([70, 90, 120, 150, 180, 204])
-    contributions = np.array([0.01666666667, 0.08333333333, 0.175, 0.35, 0.325, 0.05])
+    peaks = np.array([70, 97, 124, 150, 177, 204])
+    contributions = np.array([0.02435718372, 0.08129644245, 0.1926799386, 0.2982947723, 0.3543299546, 0.04904170837])
     kappa = 90  # Concentration parameter
     num_points = 10000
 

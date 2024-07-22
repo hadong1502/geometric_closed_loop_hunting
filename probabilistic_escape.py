@@ -54,5 +54,8 @@ def generate_angles(dir, peaks, contributions, kappa, num_points):
     plt.savefig(os.path.join(dir, 'von_mises_distribution_plots.png'))
     plt.show()
 
+    # randomize the list
+    np.random.shuffle(data_rad)
+
     return data_rad
 
